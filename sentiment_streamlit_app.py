@@ -1,759 +1,409 @@
-"""
-STREAMLIT SENTIMENT ANALYSIS APP
-=================================
-Multi-language sentiment analysis tool with Claude API integration.
-
-Features:
-- Upload Excel/CSV files with comments in any language
-- Automatic language detection
-- Sentiment analysis (Positive/Negative/Neutral)
-- Topic extraction
-- Visual dashboards
-- Downloadable results
-
-Deploy:
-    streamlit run sentiment_streamlit_app.py
-"""
-
 import streamlit as st
 import pandas as pd
 import json
-import plotly.express as px
-import plotly.graph_objects as go
-from datetime import datetime
 import io
+from datetime import datetime
+import plotly.express as px
 
-
-# Page configuration
 st.set_page_config(
     page_title="Sentiment Analysis Tool",
     page_icon="😊",
-    layout="wide",
-    initial_sidebar_state="expanded"
+    layout="wide"
 )
 
-# Custom CSS
+# ── Styling ──────────────────────────────────────────────────────────────────
 st.markdown("""
 <style>
-    .main-header {
-        font-size: 3rem;
-        font-weight: 700;
-        color: #1E2761;
-        text-align: center;
-        margin-bottom: 1rem;
-    }
-    .sub-header {
-        font-size: 1.2rem;
-        color: #666;
-        text-align: center;
-        margin-bottom: 2rem;
-    }
-    .metric-card {
-        background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
-        padding: 1.5rem;
-        border-radius: 10px;
-        color: white;
-        text-align: center;
-        box-shadow: 0 4px 6px rgba(0,0,0,0.1);
-    }
-    .stButton>button {
-        background: linear-gradient(135deg, #1E2761 0%, #667eea 100%);
-        color: white;
-        font-weight: 600;
-        border-radius: 8px;
-        padding: 0.5rem 2rem;
-        border: none;
-    }
-    .stButton>button:hover {
-        box-shadow: 0 4px 12px rgba(30, 39, 97, 0.4);
-    }
+[data-testid="stAppViewContainer"] { background: #f5f7ff; }
+.hero { text-align:center; padding: 2rem 0 1rem; }
+.hero h1 { font-size: 2.6rem; font-weight: 800; color: #1E2761; margin:0; }
+.hero p  { font-size: 1.1rem; color: #555; margin-top:.4rem; }
+.kpi-row { display:flex; gap:1rem; margin: 1.2rem 0; }
+.kpi { flex:1; border-radius:12px; padding:1.2rem; text-align:center; color:#fff; }
+.kpi .num { font-size:2rem; font-weight:800; line-height:1; }
+.kpi .lbl { font-size:.85rem; margin-top:.3rem; opacity:.9; }
+.kpi.total  { background: linear-gradient(135deg,#1E2761,#4a5db5); }
+.kpi.pos    { background: linear-gradient(135deg,#2e7d32,#66bb6a); }
+.kpi.neg    { background: linear-gradient(135deg,#c62828,#ef5350); }
+.kpi.neu    { background: linear-gradient(135deg,#555,#9e9e9e); }
+.tip-box { background:#e8f4fd; border-left:4px solid #1565c0;
+           border-radius:8px; padding:.9rem 1rem; margin:1rem 0; font-size:.92rem; }
 </style>
 """, unsafe_allow_html=True)
 
+# ── Helpers ───────────────────────────────────────────────────────────────────
+LANGUAGES = [
+    "English","Spanish","French","German","Italian","Portuguese",
+    "Hindi","Bengali","Tamil","Telugu","Marathi","Urdu",
+    "Chinese (Simplified)","Chinese (Traditional)","Japanese","Korean",
+    "Arabic","Turkish","Russian","Dutch","Polish","Greek",
+    "Swedish","Norwegian","Danish","Finnish","Hebrew",
+    "Indonesian","Malay","Thai","Vietnamese","Swahili",
+]
 
-class MultilingualSentimentAnalyzer:
-    """Sentiment analyzer with multilingual support"""
-    
-    def __init__(self):
-        self.supported_languages = [
-            "English", "Spanish", "French", "German", "Italian", 
-            "Portuguese", "Hindi", "Chinese", "Japanese", "Korean",
-            "Arabic", "Russian", "Dutch", "Polish", "Turkish",
-            "Indonesian", "Thai", "Vietnamese", "Greek", "Hebrew"
-        ]
-    
-    def detect_languages(self, comments: pd.DataFrame, text_column: str) -> dict:
-        """Detect languages present in the comments"""
-        # In production, this would use actual language detection
-        # For now, we'll use Claude to detect
-        
-        sample_comments = comments[text_column].head(20).tolist()
-        
-        prompt = f"""Analyze these comments and identify which languages are present.
+def load_file(f) -> pd.DataFrame | None:
+    ext = f.name.rsplit(".", 1)[-1].lower()
+    try:
+        if ext in ("xlsx", "xls"):
+            return pd.read_excel(f)
+        for enc in ("utf-8", "utf-8-sig", "latin-1", "iso-8859-1", "cp1252"):
+            try:
+                f.seek(0)
+                return pd.read_csv(f, encoding=enc)
+            except (UnicodeDecodeError, Exception):
+                continue
+        st.error("Could not decode the CSV. Try saving it as UTF-8.")
+    except Exception as e:
+        st.error(f"Error loading file: {e}")
+    return None
 
-COMMENTS:
-{json.dumps(sample_comments, indent=2)}
 
-Respond with JSON:
-{{
-  "languages_detected": ["English", "Spanish", "Hindi"],
-  "primary_language": "English",
-  "is_multilingual": true
-}}
-"""
-        
-        # Mock response for demo
-        return {
-            "languages_detected": ["English"],
-            "primary_language": "English",
-            "is_multilingual": False
-        }
-    
-    def create_sentiment_prompt(self, comments: list, metadata: dict = None) -> str:
-        """Create Claude prompt for sentiment analysis with multilingual support"""
-        
-        brand = metadata.get('brand', 'Brand') if metadata else 'Brand'
-        post_type = metadata.get('post_type', 'Posts') if metadata else 'Posts'
-        
-        prompt = f"""Analyze the sentiment of these comments. The comments may be in MULTIPLE LANGUAGES.
+def build_prompt(comments: list[str], brand: str, post_type: str) -> str:
+    numbered = "\n".join(f"[{i}] {str(c).strip()[:300]}" for i, c in enumerate(comments))
+    n = len(comments)
+    return f"""You are a professional social-media analyst. Analyze the sentiment of the {n} comments below.
 
-IMPORTANT: 
-- Understand and analyze comments in their original language
-- DO NOT translate - analyze sentiment directly in the source language
-- Sentiment categories: Positive, Negative, Neutral (universal across languages)
-- Topics should be in English for consistency in reporting
+CONTEXT  →  Brand: {brand} | Post type: {post_type}
 
-CONTEXT:
-- Brand: {brand}
-- Post Type: {post_type}
-- Total Comments: {len(comments)}
+━━━ MULTILINGUAL RULES ━━━
+• Comments may be in ANY language (Hindi, Spanish, Arabic, French, etc.)
+• Analyze each comment in its ORIGINAL language — do NOT translate first
+• Sentiment labels (Positive / Negative / Neutral) are universal
+• Report every "topic" in ENGLISH regardless of source language
 
-COMMENTS (may contain multiple languages):
-{json.dumps(comments[:300], indent=2, ensure_ascii=False)}
+━━━ COMMENTS ━━━
+{numbered}
 
-ANALYSIS REQUIRED:
+━━━ TASK ━━━
+For every comment return:
+  index      – same integer as the [index] above
+  language   – detected language (e.g. "Hindi", "Spanish", "English")
+  sentiment  – exactly one of: Positive | Negative | Neutral
+  topic      – the single best-fit topic IN ENGLISH from this list:
+               Product Quality · Price/Value · Taste/Flavor · Convenience ·
+               Ingredients/Nutrition · Availability · Customer Service ·
+               Packaging · Shipping · Brand Trust · Competitor Comparison ·
+               General Feedback
 
-1. For EACH comment:
-   - Detect the language (if not obvious, default to "Unknown")
-   - Determine sentiment: Positive, Negative, or Neutral
-   - Identify the main topic in English (e.g., "Product Quality", "Price", "Taste", "Service")
-   - Note: Analyze sentiment in original language, but report topic in English
+Also produce a summary block.
 
-2. Summary Statistics:
-   - Total comments analyzed
-   - Sentiment breakdown (counts and percentages)
-   - Top topics per sentiment category
-   - Languages detected
-   - Key insights
+━━━ OUTPUT FORMAT ━━━
+Return ONLY valid JSON — no markdown fences, no prose before or after.
 
-SENTIMENT GUIDELINES (Universal across languages):
-- Positive: Praise, satisfaction, recommendations, positive emotions (😊❤️👍🎉)
-- Negative: Complaints, disappointment, criticism, negative emotions (😡😢👎)
-- Neutral: Questions, neutral statements, factual information
-
-TOPIC CATEGORIES (report in English):
-- Product Quality
-- Price/Value
-- Taste/Flavor
-- Convenience
-- Ingredients/Nutrition
-- Availability/Stock
-- Customer Service
-- Packaging
-- Shipping/Delivery
-- Brand Trust
-- Comparison to competitors
-- General Feedback
-
-Respond with ONLY valid JSON (no markdown):
 {{
   "comments": [
-    {{
-      "index": 0, 
-      "language": "English",
-      "sentiment": "Positive", 
-      "topic": "Product Quality",
-      "original_text_preview": "First 50 chars of comment..."
-    }},
-    {{
-      "index": 1,
-      "language": "Spanish", 
-      "sentiment": "Negative", 
-      "topic": "Price"
-    }}
+    {{"index": 0, "language": "English", "sentiment": "Positive", "topic": "Product Quality"}},
+    {{"index": 1, "language": "Hindi",   "sentiment": "Negative", "topic": "Price/Value"}}
   ],
   "summary": {{
-    "total_analyzed": {len(comments)},
-    "languages_detected": ["English", "Spanish", "Hindi"],
-    "positive_count": 0,
-    "negative_count": 0,
-    "neutral_count": 0,
-    "positive_percentage": 0.0,
-    "negative_percentage": 0.0,
-    "neutral_percentage": 0.0,
-    "positive_topics": [
-      {{"topic": "Product Quality", "count": 0}},
-      {{"topic": "Taste", "count": 0}}
-    ],
-    "negative_topics": [
-      {{"topic": "Price", "count": 0}},
-      {{"topic": "Availability", "count": 0}}
-    ],
-    "neutral_topics": [
-      {{"topic": "General Feedback", "count": 0}}
-    ],
-    "language_distribution": {{
-      "English": 150,
-      "Spanish": 80,
-      "Hindi": 70
-    }},
-    "key_insights": [
-      "Insight 1 about multilingual feedback",
-      "Insight 2 about sentiment trends",
-      "Insight 3 about topic patterns"
-    ]
+    "total_analyzed": {n},
+    "positive_count": 0, "negative_count": 0, "neutral_count": 0,
+    "positive_pct": 0.0,  "negative_pct": 0.0,  "neutral_pct": 0.0,
+    "language_distribution": {{"English": 0, "Hindi": 0}},
+    "positive_topics":  [{{"topic": "Product Quality", "count": 0}}],
+    "negative_topics":  [{{"topic": "Price/Value",     "count": 0}}],
+    "neutral_topics":   [{{"topic": "General Feedback","count": 0}}],
+    "key_insights": ["Insight 1", "Insight 2", "Insight 3"]
   }}
 }}
 
-CRITICAL: Analyze ALL {len(comments)} comments, handling each language naturally."""
-        
-        return prompt
-    
-    async def analyze_with_claude(self, prompt: str) -> dict:
-        """Call Claude API for sentiment analysis"""
-        
-        try:
-            response = await fetch("https://api.anthropic.com/v1/messages", {
-                "method": "POST",
-                "headers": {
-                    "Content-Type": "application/json",
-                },
-                "body": json.dumps({
-                    "model": "claude-sonnet-4-20250514",
-                    "max_tokens": 8192,
-                    "messages": [
-                        {"role": "user", "content": prompt}
-                    ]
-                })
-            })
-            
-            data = await response.json()
-            content = data['content'][0]['text']
-            
-            # Remove markdown code blocks if present
-            content = content.replace('```json', '').replace('```', '').strip()
-            
-            return json.loads(content)
-            
-        except Exception as e:
-            st.error(f"API Error: {str(e)}")
-            return None
+CRITICAL: your response must contain exactly {n} objects in the "comments" array."""
 
 
-def load_data(uploaded_file) -> pd.DataFrame:
-    """Load data from uploaded Excel or CSV file"""
-    
+def parse_response(raw: str) -> dict | None:
+    cleaned = raw.strip()
+    # strip markdown fences if present
+    if cleaned.startswith("```"):
+        cleaned = cleaned.split("```", 2)[-1] if cleaned.count("```") >= 2 else cleaned
+        cleaned = cleaned.replace("json", "", 1).strip().rstrip("`").strip()
     try:
-        file_extension = uploaded_file.name.split('.')[-1].lower()
-        
-        if file_extension in ['xlsx', 'xls']:
-            df = pd.read_excel(uploaded_file)
-        elif file_extension == 'csv':
-            # Try different encodings for multilingual support
-            try:
-                df = pd.read_csv(uploaded_file, encoding='utf-8')
-            except:
-                df = pd.read_csv(uploaded_file, encoding='latin-1')
-        else:
-            st.error("Unsupported file format. Please upload Excel or CSV.")
-            return None
-        
-        return df
-        
-    except Exception as e:
-        st.error(f"Error loading file: {str(e)}")
+        return json.loads(cleaned)
+    except json.JSONDecodeError as e:
+        st.error(f"JSON parse error: {e}\n\nMake sure you copied the **entire** response from Claude.")
         return None
 
 
-def display_sentiment_dashboard(results: dict):
-    """Display interactive sentiment analysis dashboard"""
-    
-    summary = results.get('summary', {})
-    
-    # Metrics Row
-    col1, col2, col3, col4 = st.columns(4)
-    
-    with col1:
-        st.markdown(f"""
-        <div class="metric-card">
-            <h3>{summary.get('total_analyzed', 0)}</h3>
-            <p>Total Comments</p>
-        </div>
-        """, unsafe_allow_html=True)
-    
-    with col2:
-        st.markdown(f"""
-        <div class="metric-card" style="background: linear-gradient(135deg, #4caf50 0%, #66bb6a 100%);">
-            <h3>{summary.get('positive_count', 0)} ({summary.get('positive_percentage', 0):.1f}%)</h3>
-            <p>Positive</p>
-        </div>
-        """, unsafe_allow_html=True)
-    
-    with col3:
-        st.markdown(f"""
-        <div class="metric-card" style="background: linear-gradient(135deg, #f44336 0%, #e57373 100%);">
-            <h3>{summary.get('negative_count', 0)} ({summary.get('negative_percentage', 0):.1f}%)</h3>
-            <p>Negative</p>
-        </div>
-        """, unsafe_allow_html=True)
-    
-    with col4:
-        st.markdown(f"""
-        <div class="metric-card" style="background: linear-gradient(135deg, #9e9e9e 0%, #bdbdbd 100%);">
-            <h3>{summary.get('neutral_count', 0)} ({summary.get('neutral_percentage', 0):.1f}%)</h3>
-            <p>Neutral</p>
-        </div>
-        """, unsafe_allow_html=True)
-    
-    st.markdown("<br>", unsafe_allow_html=True)
-    
-    # Charts Row
-    col1, col2 = st.columns(2)
-    
-    with col1:
-        # Sentiment Distribution Pie Chart
-        st.subheader("📊 Sentiment Distribution")
-        
-        sentiment_data = pd.DataFrame({
-            'Sentiment': ['Positive', 'Negative', 'Neutral'],
-            'Count': [
-                summary.get('positive_count', 0),
-                summary.get('negative_count', 0),
-                summary.get('neutral_count', 0)
-            ]
-        })
-        
+def merge_results(df: pd.DataFrame, results: dict) -> pd.DataFrame:
+    lookup = {r["index"]: r for r in results.get("comments", [])}
+    out = df.copy()
+    out["AI_Sentiment"] = [lookup.get(i, {}).get("sentiment", "—") for i in range(len(df))]
+    out["AI_Topic"]     = [lookup.get(i, {}).get("topic",     "—") for i in range(len(df))]
+    out["AI_Language"]  = [lookup.get(i, {}).get("language",  "—") for i in range(len(df))]
+    return out
+
+
+def show_dashboard(results: dict):
+    s = results["summary"]
+    total = s.get("total_analyzed", 0)
+    pos   = s.get("positive_count", 0);  pos_pct = s.get("positive_pct", 0)
+    neg   = s.get("negative_count", 0);  neg_pct = s.get("negative_pct", 0)
+    neu   = s.get("neutral_count",  0);  neu_pct = s.get("neutral_pct",  0)
+
+    st.markdown(f"""
+    <div class="kpi-row">
+      <div class="kpi total"><div class="num">{total:,}</div><div class="lbl">Total Comments</div></div>
+      <div class="kpi pos"><div class="num">{pos:,}</div><div class="lbl">Positive&nbsp;&nbsp;{pos_pct:.1f}%</div></div>
+      <div class="kpi neg"><div class="num">{neg:,}</div><div class="lbl">Negative&nbsp;&nbsp;{neg_pct:.1f}%</div></div>
+      <div class="kpi neu"><div class="num">{neu:,}</div><div class="lbl">Neutral&nbsp;&nbsp;{neu_pct:.1f}%</div></div>
+    </div>""", unsafe_allow_html=True)
+
+    c1, c2 = st.columns(2)
+
+    with c1:
+        st.subheader("Sentiment split")
         fig = px.pie(
-            sentiment_data, 
-            values='Count', 
-            names='Sentiment',
-            color='Sentiment',
-            color_discrete_map={
-                'Positive': '#4caf50',
-                'Negative': '#f44336',
-                'Neutral': '#9e9e9e'
-            },
-            hole=0.4
+            values=[pos, neg, neu],
+            names=["Positive", "Negative", "Neutral"],
+            color_discrete_map={"Positive":"#4caf50","Negative":"#f44336","Neutral":"#9e9e9e"},
+            hole=0.45,
         )
-        
-        fig.update_traces(textposition='inside', textinfo='percent+label')
-        fig.update_layout(height=400)
-        
+        fig.update_traces(textinfo="percent+label")
+        fig.update_layout(margin=dict(t=10,b=10), height=340, showlegend=False)
         st.plotly_chart(fig, use_container_width=True)
-    
-    with col2:
-        # Language Distribution
-        st.subheader("🌍 Language Distribution")
-        
-        lang_dist = summary.get('language_distribution', {})
-        
+
+    with c2:
+        st.subheader("Language distribution")
+        lang_dist = s.get("language_distribution", {})
         if lang_dist:
-            lang_df = pd.DataFrame(list(lang_dist.items()), columns=['Language', 'Count'])
-            lang_df = lang_df.sort_values('Count', ascending=False)
-            
-            fig = px.bar(
-                lang_df,
-                x='Language',
-                y='Count',
-                color='Count',
-                color_continuous_scale='viridis'
-            )
-            
-            fig.update_layout(
-                height=400,
-                showlegend=False,
-                xaxis_title="Language",
-                yaxis_title="Number of Comments"
-            )
-            
-            st.plotly_chart(fig, use_container_width=True)
+            ldf = (pd.DataFrame(lang_dist.items(), columns=["Language","Count"])
+                     .sort_values("Count", ascending=False).head(12))
+            fig2 = px.bar(ldf, x="Language", y="Count",
+                          color="Count", color_continuous_scale="Blues", text="Count")
+            fig2.update_traces(textposition="outside")
+            fig2.update_layout(margin=dict(t=10,b=10), height=340,
+                               coloraxis_showscale=False, xaxis_title="", yaxis_title="")
+            st.plotly_chart(fig2, use_container_width=True)
         else:
-            st.info("Language distribution not available")
-    
-    # Topics Analysis
-    st.markdown("<br>", unsafe_allow_html=True)
-    st.subheader("🎯 Top Topics by Sentiment")
-    
-    col1, col2, col3 = st.columns(3)
-    
-    with col1:
-        st.markdown("### ✅ Positive Topics")
-        positive_topics = summary.get('positive_topics', [])
-        for topic in positive_topics[:5]:
-            st.markdown(f"- **{topic.get('topic')}**: {topic.get('count')} mentions")
-    
-    with col2:
-        st.markdown("### ❌ Negative Topics")
-        negative_topics = summary.get('negative_topics', [])
-        for topic in negative_topics[:5]:
-            st.markdown(f"- **{topic.get('topic')}**: {topic.get('count')} mentions")
-    
-    with col3:
-        st.markdown("### ⚪ Neutral Topics")
-        neutral_topics = summary.get('neutral_topics', [])
-        for topic in neutral_topics[:5]:
-            st.markdown(f"- **{topic.get('topic')}**: {topic.get('count')} mentions")
-    
-    # Key Insights
-    st.markdown("<br>", unsafe_allow_html=True)
-    st.subheader("💡 Key Insights")
-    
-    insights = summary.get('key_insights', [])
-    for i, insight in enumerate(insights, 1):
-        st.markdown(f"{i}. {insight}")
+            st.info("Language distribution not returned by Claude.")
+
+    # Topics
+    st.subheader("Top topics by sentiment")
+    tc1, tc2, tc3 = st.columns(3)
+    def _topic_list(col, emoji, label, key):
+        with col:
+            st.markdown(f"**{emoji} {label}**")
+            items = s.get(key, [])
+            if items:
+                for t in items[:6]:
+                    st.markdown(f"- {t.get('topic','?')} ({t.get('count',0)})")
+            else:
+                st.caption("None")
+    _topic_list(tc1, "✅","Positive","positive_topics")
+    _topic_list(tc2, "❌","Negative","negative_topics")
+    _topic_list(tc3, "⚪","Neutral", "neutral_topics")
+
+    # Insights
+    insights = s.get("key_insights", [])
+    if insights:
+        st.subheader("💡 Key insights")
+        for i, ins in enumerate(insights, 1):
+            st.markdown(f"{i}. {ins}")
 
 
-def create_detailed_dataframe(results: dict, original_df: pd.DataFrame, text_column: str) -> pd.DataFrame:
-    """Create detailed DataFrame with sentiment results"""
-    
-    comments_analysis = results.get('comments', [])
-    
-    # Create mapping
-    sentiment_map = {}
-    topic_map = {}
-    language_map = {}
-    
-    for item in comments_analysis:
-        idx = item.get('index', 0)
-        sentiment_map[idx] = item.get('sentiment', 'Unknown')
-        topic_map[idx] = item.get('topic', 'Unknown')
-        language_map[idx] = item.get('language', 'Unknown')
-    
-    # Add to dataframe
-    result_df = original_df.copy()
-    result_df['AI_Sentiment'] = result_df.index.map(lambda x: sentiment_map.get(x, 'Unknown'))
-    result_df['AI_Topic'] = result_df.index.map(lambda x: topic_map.get(x, 'Unknown'))
-    result_df['AI_Language'] = result_df.index.map(lambda x: language_map.get(x, 'Unknown'))
-    
-    return result_df
+# ── App layout ─────────────────────────────────────────────────────────────────
+st.markdown("""
+<div class="hero">
+  <h1>😊 Multilingual Sentiment Analysis</h1>
+  <p>Analyze comments in any language — no translation needed</p>
+</div>""", unsafe_allow_html=True)
 
+# Sidebar
+with st.sidebar:
+    st.markdown("### 🌍 Supported languages")
+    with st.expander("View all"):
+        for lang in LANGUAGES:
+            st.markdown(f"- {lang}")
+    st.markdown("---")
+    st.markdown("### ℹ️ How it works")
+    st.markdown("""
+1. Upload Excel / CSV  
+2. Pick the comment column  
+3. Click **Generate prompt**  
+4. Paste prompt into Claude  
+5. Copy Claude's JSON back  
+6. Click **Process response**  
+7. Explore & download!
+""")
 
-def main():
-    """Main Streamlit app"""
-    
-    # Header
-    st.markdown('<h1 class="main-header">😊 Multilingual Sentiment Analysis</h1>', unsafe_allow_html=True)
-    st.markdown('<p class="sub-header">Analyze comments in any language with AI-powered sentiment detection</p>', unsafe_allow_html=True)
-    
-    # Sidebar
-    with st.sidebar:
-        st.image("https://via.placeholder.com/200x80/1E2761/FFFFFF?text=Sentiment+AI", use_container_width=True)
-        
-        st.markdown("## 📋 Supported Features")
-        st.markdown("""
-        ✅ Multiple file formats (Excel, CSV)  
-        ✅ 20+ languages supported  
-        ✅ Automatic language detection  
-        ✅ Topic extraction  
-        ✅ Visual dashboards  
-        ✅ Downloadable results  
-        """)
-        
-        st.markdown("---")
-        
-        st.markdown("## 🌍 Supported Languages")
-        analyzer = MultilingualSentimentAnalyzer()
-        
-        with st.expander("View all languages"):
-            for lang in analyzer.supported_languages:
-                st.markdown(f"• {lang}")
-        
-        st.markdown("---")
-        
-        st.markdown("## 📊 How It Works")
-        st.markdown("""
-        1. **Upload** your comments file
-        2. **Select** the text column
-        3. **Analyze** with Claude AI
-        4. **View** interactive dashboard
-        5. **Download** results
-        """)
-    
-    # Main content
-    tab1, tab2, tab3 = st.tabs(["📤 Upload & Analyze", "📊 Results", "ℹ️ About"])
-    
-    with tab1:
-        st.markdown("### Step 1: Upload Your Comments File")
-        
-        uploaded_file = st.file_uploader(
-            "Choose an Excel or CSV file",
-            type=['xlsx', 'xls', 'csv'],
-            help="Upload a file containing comments in any language"
-        )
-        
-        if uploaded_file:
-            # Load data
-            df = load_data(uploaded_file)
-            
-            if df is not None:
-                st.success(f"✅ File loaded successfully! Found {len(df)} rows.")
-                
-                # Show preview
-                with st.expander("📋 Preview Data"):
-                    st.dataframe(df.head(10))
-                
-                st.markdown("### Step 2: Configure Analysis")
-                
-                col1, col2 = st.columns(2)
-                
-                with col1:
-                    # Select text column
-                    text_column = st.selectbox(
-                        "Select the column containing comments",
-                        options=df.columns.tolist(),
-                        help="Choose the column with the text you want to analyze"
+# Tabs
+tab_upload, tab_results, tab_guide = st.tabs(["📤 Upload & Analyze", "📊 Results", "📖 Guide"])
+
+# ── TAB 1 ─────────────────────────────────────────────────────────────────────
+with tab_upload:
+    st.markdown("#### Step 1 — Upload your comments file")
+    uploaded = st.file_uploader(
+        "Excel (.xlsx / .xls) or CSV — any language, any encoding",
+        type=["xlsx","xls","csv"]
+    )
+
+    if uploaded:
+        df = load_file(uploaded)
+        if df is not None:
+            st.success(f"✅ Loaded **{len(df):,} rows** · {len(df.columns)} columns")
+            with st.expander("Preview (first 10 rows)"):
+                st.dataframe(df.head(10), use_container_width=True)
+
+            st.markdown("#### Step 2 — Configure")
+            col_a, col_b = st.columns(2)
+            with col_a:
+                text_col = st.selectbox("Comment column *", df.columns.tolist())
+            with col_b:
+                max_comments = st.slider("Max comments to send Claude", 50, 300, 200, 25,
+                    help="Claude handles ~300 comments well in one call. For larger files, run in batches.")
+
+            col_c, col_d = st.columns(2)
+            with col_c:
+                brand = st.text_input("Brand name", "Brand")
+            with col_d:
+                post_type = st.text_input("Post type", "All posts")
+
+            # sample preview
+            if text_col:
+                samples = df[text_col].dropna().astype(str).head(4).tolist()
+                st.markdown("**Sample comments from selected column:**")
+                for s_text in samples:
+                    st.markdown(f"> {s_text[:180]}")
+
+            st.markdown("#### Step 3 — Generate prompt")
+            if st.button("🚀 Generate Claude prompt", type="primary", use_container_width=True):
+                comments = df[text_col].fillna("").astype(str).tolist()[:max_comments]
+                prompt = build_prompt(comments, brand, post_type)
+                st.session_state["prompt"]   = prompt
+                st.session_state["src_df"]   = df
+                st.session_state["text_col"] = text_col
+                st.session_state["n_sent"]   = len(comments)
+                st.success(f"Prompt ready — covers **{len(comments):,} comments**")
+
+            if "prompt" in st.session_state:
+                st.markdown("#### Step 4 — Copy prompt → paste in Claude → paste response back")
+                with st.expander("📋 Claude prompt (click to expand & copy)", expanded=True):
+                    st.code(st.session_state["prompt"], language="text")
+                    st.download_button(
+                        "⬇️ Download prompt as .txt",
+                        data=st.session_state["prompt"],
+                        file_name=f"sentiment_prompt_{datetime.now():%Y%m%d_%H%M%S}.txt",
                     )
-                
-                with col2:
-                    # Optional: Select grouping columns
-                    group_columns = st.multiselect(
-                        "Select grouping columns (optional)",
-                        options=[col for col in df.columns if col != text_column],
-                        help="Group analysis by brand, post type, etc."
-                    )
-                
-                # Additional metadata
-                st.markdown("### Step 3: Add Context (Optional)")
-                
-                col1, col2 = st.columns(2)
-                
-                with col1:
-                    brand_name = st.text_input("Brand Name", value="Brand")
-                
-                with col2:
-                    post_type = st.text_input("Post Type", value="All Posts")
-                
-                # Analyze button
-                st.markdown("### Step 4: Run Analysis")
-                
-                if st.button("🚀 Analyze Sentiment", type="primary", use_container_width=True):
-                    
-                    with st.spinner("🤖 Claude is analyzing your comments..."):
-                        
-                        # Create analyzer
-                        analyzer = MultilingualSentimentAnalyzer()
-                        
-                        # Prepare comments
-                        comments = df[text_column].fillna('').tolist()
-                        
-                        # Create prompt
-                        metadata = {
-                            'brand': brand_name,
-                            'post_type': post_type
-                        }
-                        
-                        prompt = analyzer.create_sentiment_prompt(comments, metadata)
-                        
-                        # Show prompt in expander
-                        with st.expander("🔍 View Claude Prompt"):
-                            st.code(prompt, language="text")
-                        
-                        st.info("""
-                        **For this demo:** Copy the prompt above and paste it into Claude to get the sentiment analysis.
-                        
-                        In production, this would automatically call the Claude API.
-                        """)
-                        
-                        # Instructions for manual use
-                        st.markdown("""
-                        ### 📝 Instructions:
-                        
-                        1. **Copy the prompt** from the expander above
-                        2. **Open Claude** (claude.ai or app)
-                        3. **Paste and send** the prompt
-                        4. **Copy Claude's response** (the entire JSON)
-                        5. **Paste the response** in the text area below
-                        6. **Click "Process Results"**
-                        """)
-                        
-                        # Text area for Claude's response
-                        claude_response = st.text_area(
-                            "Paste Claude's JSON response here:",
-                            height=300,
-                            placeholder='{"comments": [...], "summary": {...}}'
-                        )
-                        
-                        if st.button("Process Results", use_container_width=True):
-                            if claude_response:
-                                try:
-                                    # Parse response
-                                    response = claude_response.replace('```json', '').replace('```', '').strip()
-                                    results = json.loads(response)
-                                    
-                                    # Store in session state
-                                    st.session_state['results'] = results
-                                    st.session_state['original_df'] = df
-                                    st.session_state['text_column'] = text_column
-                                    
-                                    st.success("✅ Results processed successfully! Go to the 'Results' tab to view.")
-                                    
-                                except Exception as e:
-                                    st.error(f"Error parsing response: {str(e)}")
-                            else:
-                                st.warning("Please paste Claude's response first.")
-    
-    with tab2:
-        st.markdown("## 📊 Analysis Results")
-        
-        if 'results' in st.session_state:
-            results = st.session_state['results']
-            
-            # Display dashboard
-            display_sentiment_dashboard(results)
-            
-            # Detailed results
-            st.markdown("<br><br>", unsafe_allow_html=True)
-            st.subheader("📋 Detailed Results")
-            
-            if 'original_df' in st.session_state:
-                detailed_df = create_detailed_dataframe(
-                    results,
-                    st.session_state['original_df'],
-                    st.session_state['text_column']
+
+                st.markdown("""
+<div class="tip-box">
+<b>📌 Next step:</b><br>
+Copy the prompt above → open <a href="https://claude.ai" target="_blank">claude.ai</a>
+→ paste & send → copy Claude's entire JSON reply → paste below → click <b>Process response</b>.
+</div>""", unsafe_allow_html=True)
+
+                raw_response = st.text_area(
+                    "Paste Claude's JSON response here",
+                    height=260,
+                    placeholder='{"comments":[...],"summary":{...}}'
                 )
-                
-                # Filter options
-                col1, col2 = st.columns(2)
-                
-                with col1:
-                    sentiment_filter = st.multiselect(
-                        "Filter by Sentiment",
-                        options=['Positive', 'Negative', 'Neutral'],
-                        default=['Positive', 'Negative', 'Neutral']
-                    )
-                
-                with col2:
-                    if 'AI_Language' in detailed_df.columns:
-                        language_filter = st.multiselect(
-                            "Filter by Language",
-                            options=detailed_df['AI_Language'].unique().tolist(),
-                            default=detailed_df['AI_Language'].unique().tolist()
-                        )
-                
-                # Apply filters
-                filtered_df = detailed_df[detailed_df['AI_Sentiment'].isin(sentiment_filter)]
-                
-                if 'AI_Language' in detailed_df.columns:
-                    filtered_df = filtered_df[filtered_df['AI_Language'].isin(language_filter)]
-                
-                st.dataframe(filtered_df, use_container_width=True, height=400)
-                
-                # Download buttons
-                st.markdown("### 💾 Download Results")
-                
-                col1, col2 = st.columns(2)
-                
-                with col1:
-                    # Excel download
-                    buffer = io.BytesIO()
-                    with pd.ExcelWriter(buffer, engine='openpyxl') as writer:
-                        filtered_df.to_excel(writer, index=False, sheet_name='Sentiment Analysis')
-                    
-                    st.download_button(
-                        label="📥 Download Excel",
-                        data=buffer.getvalue(),
-                        file_name=f"sentiment_analysis_{datetime.now().strftime('%Y%m%d_%H%M%S')}.xlsx",
-                        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
-                    )
-                
-                with col2:
-                    # JSON download
-                    json_str = json.dumps(results, indent=2)
-                    
-                    st.download_button(
-                        label="📥 Download JSON",
-                        data=json_str,
-                        file_name=f"sentiment_summary_{datetime.now().strftime('%Y%m%d_%H%M%S')}.json",
-                        mime="application/json"
-                    )
-        
-        else:
-            st.info("👆 Upload and analyze a file first to see results here!")
-    
-    with tab3:
-        st.markdown("## ℹ️ About This Tool")
-        
-        st.markdown("""
-        ### 🎯 Purpose
-        
-        This tool helps you analyze sentiment in customer comments, reviews, and social media posts 
-        across **multiple languages** without requiring translation.
-        
-        ### ✨ Key Features
-        
-        - **Multilingual Support**: Analyzes comments in 20+ languages
-        - **No Translation Needed**: Direct sentiment analysis in source language
-        - **Topic Extraction**: Identifies what people are talking about
-        - **Visual Insights**: Interactive charts and dashboards
-        - **Export Results**: Download analyzed data in Excel or JSON
-        
-        ### 🤖 How It Works
-        
-        1. **Upload**: You upload a file with comments in any language(s)
-        2. **AI Analysis**: Claude analyzes each comment:
-           - Detects the language
-           - Determines sentiment (Positive/Negative/Neutral)
-           - Identifies the topic being discussed
-        3. **Visualization**: Results are displayed in an interactive dashboard
-        4. **Export**: Download the complete analysis
-        
-        ### 🌍 Supported Languages
-        
-        English, Spanish, French, German, Italian, Portuguese, Hindi, Chinese, Japanese, Korean,
-        Arabic, Russian, Dutch, Polish, Turkish, Indonesian, Thai, Vietnamese, Greek, Hebrew, 
-        and many more!
-        
-        ### 📊 Use Cases
-        
-        - Social media comment analysis
-        - Product review sentiment tracking
-        - Customer feedback analysis
-        - Brand health monitoring
-        - Competitor analysis
-        - Campaign performance measurement
-        
-        ### 🔒 Privacy & Security
-        
-        - Your data is processed securely
-        - No data is stored permanently
-        - Analysis happens in real-time
-        - You control data access and downloads
-        
-        ### 💡 Tips for Best Results
-        
-        1. **Clean Data**: Remove spam or irrelevant comments first
-        2. **Context Matters**: Provide brand/post type for better accuracy
-        3. **Review Results**: Spot-check a sample to verify accuracy
-        4. **Iterate**: Refine based on what you learn
-        
-        ### 📞 Support
-        
-        Need help? Have questions? Want to customize this tool?
-        
-        Contact your development team for:
-        - Custom theme/topic categories
-        - API integration
-        - Batch processing
-        - Scheduled automation
-        """)
-        
+
+                if st.button("✨ Process response", use_container_width=True, type="primary"):
+                    if raw_response.strip():
+                        results = parse_response(raw_response)
+                        if results:
+                            st.session_state["results"] = results
+                            st.success("✅ Results processed! Open the **Results** tab.")
+                            st.balloons()
+                    else:
+                        st.warning("Please paste Claude's response first.")
+
+# ── TAB 2 ─────────────────────────────────────────────────────────────────────
+with tab_results:
+    if "results" not in st.session_state:
+        st.info("👆 Complete the analysis in the Upload tab first.")
+    else:
+        results = st.session_state["results"]
+        show_dashboard(results)
+
         st.markdown("---")
-        st.markdown("**Version 1.0** | Built with ❤️ using Streamlit & Claude AI")
+        st.subheader("📋 Detailed results")
 
+        merged = merge_results(st.session_state["src_df"], results)
 
-if __name__ == "__main__":
-    # Initialize session state
-    if 'results' not in st.session_state:
-        st.session_state['results'] = None
-    
-    main()
+        # Filters
+        f1, f2, f3 = st.columns(3)
+        with f1:
+            sent_opts = merged["AI_Sentiment"].unique().tolist()
+            sent_filter = st.multiselect("Sentiment", sent_opts, default=sent_opts)
+        with f2:
+            lang_opts = merged["AI_Language"].unique().tolist()
+            lang_filter = st.multiselect("Language", lang_opts, default=lang_opts)
+        with f3:
+            topic_opts = merged["AI_Topic"].unique().tolist()
+            topic_filter = st.multiselect("Topic", topic_opts, default=topic_opts)
+
+        view = merged[
+            merged["AI_Sentiment"].isin(sent_filter) &
+            merged["AI_Language"].isin(lang_filter) &
+            merged["AI_Topic"].isin(topic_filter)
+        ]
+        st.caption(f"Showing {len(view):,} of {len(merged):,} rows")
+        st.dataframe(view, use_container_width=True, height=380)
+
+        # Downloads
+        st.markdown("### ⬇️ Download results")
+        d1, d2, d3 = st.columns(3)
+        with d1:
+            buf = io.BytesIO()
+            with pd.ExcelWriter(buf, engine="openpyxl") as w:
+                view.to_excel(w, index=False, sheet_name="Sentiment")
+                s = results["summary"]
+                pd.DataFrame({
+                    "Metric":     ["Total","Positive","Negative","Neutral"],
+                    "Count":      [s.get("total_analyzed",0), s.get("positive_count",0),
+                                   s.get("negative_count",0), s.get("neutral_count",0)],
+                    "Percentage": [100, s.get("positive_pct",0),
+                                   s.get("negative_pct",0), s.get("neutral_pct",0)],
+                }).to_excel(w, index=False, sheet_name="Summary")
+            st.download_button("📥 Excel", buf.getvalue(),
+                file_name=f"sentiment_{datetime.now():%Y%m%d_%H%M%S}.xlsx",
+                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                use_container_width=True)
+        with d2:
+            st.download_button("📥 CSV", view.to_csv(index=False),
+                file_name=f"sentiment_{datetime.now():%Y%m%d_%H%M%S}.csv",
+                mime="text/csv", use_container_width=True)
+        with d3:
+            st.download_button("📥 JSON summary", json.dumps(results["summary"], indent=2),
+                file_name=f"sentiment_summary_{datetime.now():%Y%m%d_%H%M%S}.json",
+                mime="application/json", use_container_width=True)
+
+# ── TAB 3 ─────────────────────────────────────────────────────────────────────
+with tab_guide:
+    st.markdown("""
+## 📖 Quick-start guide
+
+### Supported file formats
+| Format | Extension | Notes |
+|--------|-----------|-------|
+| Excel  | .xlsx / .xls | All sheets, multi-language cells |
+| CSV    | .csv | Auto-detects encoding (UTF-8, Latin-1, etc.) |
+
+### Multilingual support
+Claude reads each comment in its original language — no pre-translation step needed.
+Topics are always reported in **English** so your pivot tables stay consistent.
+
+**Tested languages include:** English, Spanish, Hindi, Arabic, French, German,
+Chinese, Japanese, Korean, Portuguese, Russian, and many more.
+
+### Tips for best results
+- **Batch size:** 150–200 comments per call gives the best accuracy/speed balance.
+- **Context matters:** Filling in the brand name and post type improves topic labeling.
+- **Check a sample:** After processing, spot-check 10–15 rows to verify accuracy.
+- **Large files:** For 500+ comments, run two or three separate analyses and combine the Excel downloads.
+
+### Understanding the outputs
+| Column | Meaning |
+|--------|---------|
+| `AI_Sentiment` | Positive / Negative / Neutral |
+| `AI_Topic` | Main topic discussed (in English) |
+| `AI_Language` | Language Claude detected for that comment |
+
+### Troubleshooting
+| Symptom | Fix |
+|---------|-----|
+| "JSON parse error" | Make sure you copied **all** of Claude's response, including the outer `{}` |
+| Wrong language detected | Provide more context in the Brand/Post-type fields |
+| Encoding error on CSV | Re-save your file as UTF-8 in Excel (Save As → CSV UTF-8) |
+| Fewer rows than expected | Increase the *Max comments* slider and re-generate the prompt |
+""")
